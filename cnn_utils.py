@@ -5,6 +5,7 @@ from dropout_utils import layer_dropout
 from nn_utils import initializer, initializer_relu, regularizer
 from batchnorm_utils import norm_fn
 
+
 def conv1d(in_, filter_size, height, padding, is_train=None, keep_prob=1.0, scope=None):
     with tf.variable_scope(scope or "conv1d"):
         num_channels = in_.get_shape()[-1] #dc
@@ -110,3 +111,190 @@ def depthwise_separable_convolution(inputs, kernel_size, num_filters,
             outputs += b
         outputs = tf.nn.relu(outputs)
         return outputs
+
+
+INITIALIZER = tf.orthogonal_initializer
+
+
+def stacked_cnn(units: tf.Tensor,
+                n_hidden_list: List,
+                filter_width=3,
+                use_batch_norm=False,
+                use_dilation=False,
+                training_ph=None,
+                add_l2_losses=False):
+    """ Number of convolutional layers stacked on top of each other
+
+    Args:
+        units: a tensorflow tensor with dimensionality [None, n_tokens, n_features]
+        n_hidden_list: list with number of hidden units at the ouput of each layer
+        filter_width: width of the kernel in tokens
+        use_batch_norm: whether to use batch normalization between layers
+        use_dilation: use power of 2 dilation scheme [1, 2, 4, 8 .. ] for layers 1, 2, 3, 4 ...
+        training_ph: boolean placeholder determining whether is training phase now or not.
+            It is used only for batch normalization to determine whether to use
+            current batch average (std) or memory stored average (std)
+        add_l2_losses: whether to add l2 losses on network kernels to
+                tf.GraphKeys.REGULARIZATION_LOSSES or not
+
+    Returns:
+        units: tensor at the output of the last convolutional layer
+    """
+
+    for n_layer, n_hidden in enumerate(n_hidden_list):
+        if use_dilation:
+            dilation_rate = 2 ** n_layer
+        else:
+            dilation_rate = 1
+        units = tf.layers.conv1d(units,
+                                 n_hidden,
+                                 filter_width,
+                                 padding='same',
+                                 dilation_rate=dilation_rate,
+                                 kernel_initializer=INITIALIZER(),
+                                 kernel_regularizer=tf.nn.l2_loss)
+        if use_batch_norm:
+            assert training_ph is not None
+            units = tf.layers.batch_normalization(units, training=training_ph)
+        units = tf.nn.relu(units)
+    return units
+
+
+def dense_convolutional_network(units: tf.Tensor,
+                                n_hidden_list: List,
+                                filter_width=3,
+                                use_dilation=False,
+                                use_batch_norm=False,
+                                training_ph=None):
+    """ Densely connected convolutional layers. Based on the paper:
+        [Gao 17] https://arxiv.org/abs/1608.06993
+
+        Args:
+            units: a tensorflow tensor with dimensionality [None, n_tokens, n_features]
+            n_hidden_list: list with number of hidden units at the ouput of each layer
+            filter_width: width of the kernel in tokens
+            use_batch_norm: whether to use batch normalization between layers
+            use_dilation: use power of 2 dilation scheme [1, 2, 4, 8 .. ] for layers 1, 2, 3, 4 ...
+            training_ph: boolean placeholder determining whether is training phase now or not.
+                It is used only for batch normalization to determine whether to use
+                current batch average (std) or memory stored average (std)
+        Returns:
+            units: tensor at the output of the last convolutional layer
+                with dimensionality [None, n_tokens, n_hidden_list[-1]]
+        """
+    units_list = [units]
+    for n_layer, n_filters in enumerate(n_hidden_list):
+        total_units = tf.concat(units_list, axis=-1)
+        if use_dilation:
+            dilation_rate = 2 ** n_layer
+        else:
+            dilation_rate = 1
+        units = tf.layers.conv1d(total_units,
+                                 n_filters,
+                                 filter_width,
+                                 dilation_rate=dilation_rate,
+                                 padding='same',
+                                 kernel_initializer=INITIALIZER())
+        if use_batch_norm:
+            units = tf.layers.batch_normalization(units, training=training_ph)
+        units = tf.nn.relu(units)
+        units_list.append(units)
+    return units
+
+
+def u_shape(units: tf.Tensor,
+            n_hidden_list: List,
+            filter_width=7,
+            use_batch_norm=False,
+            training_ph=None):
+    """ Network architecture inspired by One Hundred layer Tiramisu.
+        https://arxiv.org/abs/1611.09326. U-Net like.
+
+        Args:
+            units: a tensorflow tensor with dimensionality [None, n_tokens, n_features]
+            n_hidden_list: list with number of hidden units at the ouput of each layer
+            filter_width: width of the kernel in tokens
+            use_batch_norm: whether to use batch normalization between layers
+            training_ph: boolean placeholder determining whether is training phase now or not.
+                It is used only for batch normalization to determine whether to use
+                current batch average (std) or memory stored average (std)
+        Returns:
+            units: tensor at the output of the last convolutional layer
+                    with dimensionality [None, n_tokens, n_hidden_list[-1]]
+    """
+    units_for_skip_conn = []
+    conv_net_params = {'filter_width': filter_width,
+                       'use_batch_norm': use_batch_norm,
+                       'training_ph': training_ph}
+
+    # Go down the rabbit hole
+    for n_hidden in n_hidden_list:
+        units = stacked_cnn(units, [n_hidden], **conv_net_params)
+        units_for_skip_conn.append(units)
+        units = tf.layers.max_pooling1d(units, pool_size=2, strides=2, padding='same')
+
+    units = stacked_cnn(units, [n_hidden], **conv_net_params)
+
+    # Up to the sun light
+    for down_step, n_hidden in enumerate(n_hidden_list[::-1]):
+        units = tf.expand_dims(units, axis=2)
+        units = tf.layers.conv2d_transpose(units, n_hidden, filter_width, strides=(2, 1), padding='same')
+        units = tf.squeeze(units, axis=2)
+
+        # Skip connection
+        skip_units = units_for_skip_conn[-(down_step + 1)]
+        if skip_units.get_shape().as_list()[-1] != n_hidden:
+            skip_units = tf.layers.dense(skip_units, n_hidden)
+        units = skip_units + units
+
+        units = stacked_cnn(units, [n_hidden], **conv_net_params)
+    return units
+
+
+def stacked_highway_cnn(units: tf.Tensor,
+                        n_hidden_list: List,
+                        filter_width=3,
+                        use_batch_norm=False,
+                        use_dilation=False,
+                        training_ph=None):
+    """ Highway convolutional network. Skip connection with gating
+        mechanism.
+
+    Args:
+        units: a tensorflow tensor with dimensionality [None, n_tokens, n_features]
+        n_hidden_list: list with number of hidden units at the output of each layer
+        filter_width: width of the kernel in tokens
+        use_batch_norm: whether to use batch normalization between layers
+        use_dilation: use power of 2 dilation scheme [1, 2, 4, 8 .. ] for layers 1, 2, 3, 4 ...
+        training_ph: boolean placeholder determining whether is training phase now or not.
+            It is used only for batch normalization to determine whether to use
+            current batch average (std) or memory stored average (std)
+    Returns:
+        units: tensor at the output of the last convolutional layer
+                with dimensionality [None, n_tokens, n_hidden_list[-1]]
+    """
+    for n_layer, n_hidden in enumerate(n_hidden_list):
+        input_units = units
+        # Projection if needed
+        if input_units.get_shape().as_list()[-1] != n_hidden:
+            input_units = tf.layers.dense(input_units, n_hidden)
+        if use_dilation:
+            dilation_rate = 2 ** n_layer
+        else:
+            dilation_rate = 1
+        units = tf.layers.conv1d(units,
+                                 n_hidden,
+                                 filter_width,
+                                 padding='same',
+                                 dilation_rate=dilation_rate,
+                                 kernel_initializer=INITIALIZER())
+        if use_batch_norm:
+            units = tf.layers.batch_normalization(units, training=training_ph)
+        sigmoid_gate = tf.layers.dense(input_units, 1, activation=tf.sigmoid, kernel_initializer=INITIALIZER())
+        input_units = sigmoid_gate * input_units + (1 - sigmoid_gate) * units
+        input_units = tf.nn.relu(input_units)
+    units = input_units
+    return units
+
+
+
