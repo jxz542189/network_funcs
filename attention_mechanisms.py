@@ -17,8 +17,8 @@ limitations under the License.
 import tensorflow as tf
 from tensorflow.contrib.layers import xavier_initializer as xav
 
-from layer_utils import csoftmax_attention
-from utils.log import get_logger
+import csoftmax_attention
+from log import get_logger
 
 
 log = get_logger(__name__)

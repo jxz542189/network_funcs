@@ -1,9 +1,12 @@
 import tensorflow as tf
 from nn_utils import flatten, reconstruct
-f
+from tensorflow.python.ops import nn_ops
 
 INF = 1e30
-
+INITIALIZER = lambda: tf.contrib.layers.variance_scaling_initializer(factor=2.0,
+                                                             mode='FAN_IN',
+                                                             uniform=False,
+                                                             dtype=tf.float32)
 
 def dynamic_rnn(cell, inputs, sequence_length=None, initial_state=None,
                 dtype=None, parallel_iterations=None, swap_memory=False,
@@ -174,7 +177,7 @@ def dropout(args, keep_prob, is_train, mode="recurrent"):
 
 
 def bi_rnn(units: tf.Tensor,
-           n_hidden: List,
+           n_hidden,
            cell_type='gru',
            seq_lengths=None,
            trainable_initial_states=False,
@@ -242,7 +245,7 @@ def bi_rnn(units: tf.Tensor,
 
 
 def stacked_bi_rnn(units: tf.Tensor,
-                   n_hidden_list: List,
+                   n_hidden_list,
                    cell_type='gru',
                    seq_lengths=None,
                    use_peepholes=False,
@@ -292,5 +295,54 @@ def stacked_bi_rnn(units: tf.Tensor,
                 h = tf.concat([h_fw, h_bw], axis=1)
                 last_units = (h, c)
     return units, last_units
+
+
+def my_lstm_layer(input_reps, lstm_dim, input_lengths=None, scope_name=None, reuse=False,
+                  is_training=True, dropout_rate=0.2, use_cudnn=True):
+    '''
+
+    :param input_reps: [batch_size, seq_len, feature_dim]
+    :param lstm_dim:
+    :param input_lengths:
+    :param scope_name:
+    :param reuse:
+    :param is_training:
+    :param dropout_rate:
+    :param use_cudnn:
+    :return:
+    '''
+    input_reps = dropout_layer(input_reps, dropout_rate, is_training=is_training)
+    with tf.variable_scope(scope_name, reuse=reuse):
+        if use_cudnn:
+            inputs = tf.transpose(input_reps, [1, 0, 2])
+            lstm = tf.contrib.cudnn_rnn.CudnnLSTM(1, lstm_dim, direction="bidirectional",
+                                                  name="{}_cudnn_bi_lstm".format(scope_name),
+                                                  dropout=dropout_rate if is_training else 0)
+            outputs, _ = lstm(inputs)
+            outputs = tf.transpose(outputs, [1, 0, 2])
+            f_rep = outputs[:, :, 0:lstm_dim]
+            b_rep = outputs[:, :, lstm_dim: s * lstm_dim]
+        else:
+            context_lstm_cell_fw = tf.nn.rnn_cell.BasicLSTMCell(lstm_dim)
+            context_lstm_cell_bw = tf.nn.rnn_cell.BasicLSTMCell(lstm_dim)
+            if is_training:
+                context_lstm_cell_fw = tf.nn.rnn_cell.DropoutWrapper(context_lstm_cell_fw,
+                                                                     output_keep_prob=(1 - dropout_rate))
+                context_lstm_cell_bw = tf.nn.rnn_cell.DropoutWrapper(context_lstm_cell_bw,
+                                                                     output_keep_prob=(1 - dropout_rate))
+            context_lstm_cell_fw = tf.nn.rnn_cell.MultiRNNCell([context_lstm_cell_fw])
+            context_lstm_cell_bw = tf.nn.rnn_cell.MultiRNNCell([context_lstm_cell_bw])
+            (f_rep, b_rep), _ = tf.nn.bidirectional_dynamic_rnn(context_lstm_cell_fw, context_lstm_cell_bw, input_reps,
+                                                                dtype=tf.float32, sequence_length=input_lengths)
+            outputs = tf.concat(axis=2, values=[f_rep, b_rep])
+    return f_rep, b_rep, outputs
+
+
+def dropout_layer(input_reps, dropout_rate, is_training=True):
+    if is_training:
+        output_repr = tf.nn.dropout(input_reps, (1 - dropout_rate))
+    else:
+        output_repr = input_reps
+    return output_repr
 
 

@@ -203,7 +203,7 @@ def dense_convolutional_network(units: tf.Tensor,
 
 
 def u_shape(units: tf.Tensor,
-            n_hidden_list: List,
+            n_hidden_list,
             filter_width=7,
             use_batch_norm=False,
             training_ph=None):
@@ -252,7 +252,7 @@ def u_shape(units: tf.Tensor,
 
 
 def stacked_highway_cnn(units: tf.Tensor,
-                        n_hidden_list: List,
+                        n_hidden_list,
                         filter_width=3,
                         use_batch_norm=False,
                         use_dilation=False,
