@@ -117,7 +117,7 @@ INITIALIZER = tf.orthogonal_initializer
 
 
 def stacked_cnn(units: tf.Tensor,
-                n_hidden_list: List,
+                n_hidden_list: list,
                 filter_width=3,
                 use_batch_norm=False,
                 use_dilation=False,
@@ -161,7 +161,7 @@ def stacked_cnn(units: tf.Tensor,
 
 
 def dense_convolutional_network(units: tf.Tensor,
-                                n_hidden_list: List,
+                                n_hidden_list: list,
                                 filter_width=3,
                                 use_dilation=False,
                                 use_batch_norm=False,
@@ -203,7 +203,7 @@ def dense_convolutional_network(units: tf.Tensor,
 
 
 def u_shape(units: tf.Tensor,
-            n_hidden_list: List,
+            n_hidden_list: list,
             filter_width=7,
             use_batch_norm=False,
             training_ph=None):
@@ -252,7 +252,7 @@ def u_shape(units: tf.Tensor,
 
 
 def stacked_highway_cnn(units: tf.Tensor,
-                        n_hidden_list: List,
+                        n_hidden_list: list,
                         filter_width=3,
                         use_batch_norm=False,
                         use_dilation=False,
@@ -295,6 +295,67 @@ def stacked_highway_cnn(units: tf.Tensor,
         input_units = tf.nn.relu(input_units)
     units = input_units
     return units
+
+
+def conv(inputs, output_size, bias=None, activation=None, kernel_size=1, name="conv", reuse=None):
+    with tf.variable_scope(name, reuse=reuse):
+        shapes = inputs.shape.as_list()
+        if len(shapes) > 4:
+            raise NotImplementedError
+        elif len(shapes) == 4:
+            filter_shape = [1, kernel_size, shapes[-1], output_size]
+            bias_shape = [1, 1, 1, output_size]
+            strides = [1, 1, 1, 1]
+        else:
+            filter_shape = [kernel_size, shapes[-1], output_size]
+            bias_shape = [1, 1, output_size]
+            strides = 1
+        conv_func = tf.nn.conv1d if len(shapes) == 3 else tf.nn.conv2d
+        kernel_ = tf.get_variable("kernel_",
+                        filter_shape,
+                        dtype=tf.float32,
+                        regularizer=regularizer,
+                        initializer=initializer_relu() if activation is not None else initializer())
+        outputs = conv_func(inputs, kernel_, strides, "VALID")
+        if bias:
+            outputs += tf.get_variable("bias_",
+                        bias_shape,
+                        regularizer=regularizer,
+                        initializer=tf.zeros_initializer())
+        if activation is not None:
+            return activation(outputs)
+        else:
+            return outputs
+
+
+def depthwise_separable_convolution(inputs, kernel_size, num_filters,
+                                    scope="depthwise_separable_convolution",
+                                    bias=True, is_training=True, reuse=None):
+    with tf.variable_scope(scope, reuse = reuse):
+        shapes = inputs.shape.as_list()
+        depthwise_filter = tf.get_variable("depthwise_filter",
+                                        (kernel_size[0], kernel_size[1], shapes[-1], 1),
+                                        dtype=tf.float32,
+                                        regularizer=regularizer,
+                                        initializer=initializer_relu())
+        pointwise_filter = tf.get_variable("pointwise_filter",
+                                        (1, 1, shapes[-1], num_filters),
+                                        dtype=tf.float32,
+                                        regularizer=regularizer,
+                                        initializer=initializer_relu())
+        outputs = tf.nn.separable_conv2d(inputs,
+                                        depthwise_filter,
+                                        pointwise_filter,
+                                        strides=(1, 1, 1, 1),
+                                        padding="SAME")
+        if bias:
+            b = tf.get_variable("bias",
+                    outputs.shape[-1],
+                    regularizer=regularizer,
+                    initializer=tf.zeros_initializer())
+            outputs += b
+        outputs = tf.nn.relu(outputs)
+        return outputs
 
 
 

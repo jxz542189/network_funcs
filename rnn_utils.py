@@ -1,6 +1,6 @@
 import tensorflow as tf
 from nn_utils import flatten, reconstruct
-f
+from nn_utils import initializer as INITIALIZER
 
 INF = 1e30
 
@@ -174,7 +174,7 @@ def dropout(args, keep_prob, is_train, mode="recurrent"):
 
 
 def bi_rnn(units: tf.Tensor,
-           n_hidden: List,
+           n_hidden: list,
            cell_type='gru',
            seq_lengths=None,
            trainable_initial_states=False,
@@ -242,7 +242,7 @@ def bi_rnn(units: tf.Tensor,
 
 
 def stacked_bi_rnn(units: tf.Tensor,
-                   n_hidden_list: List,
+                   n_hidden_list: list,
                    cell_type='gru',
                    seq_lengths=None,
                    use_peepholes=False,

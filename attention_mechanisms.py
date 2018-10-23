@@ -17,8 +17,11 @@ limitations under the License.
 import tensorflow as tf
 from tensorflow.contrib.layers import xavier_initializer as xav
 
-from layer_utils import csoftmax_attention
-from utils.log import get_logger
+import csoftmax_attention
+from log import get_logger
+from cnn_utils import conv
+from mask_utils import mask_logits
+from nn_utils import split_last_dimension, combine_last_two_dimensions, regularizer
 
 
 log = get_logger(__name__)
@@ -337,3 +340,73 @@ def cs_bahdanau_attention(key, context, hidden_size, depth, projected_align=Fals
         output = \
             tf.reshape(aligned_h_state, shape=[batch_size, -1, depth * token_size])
     return output
+
+
+def multihead_attention(queries, units, num_heads,
+                        memory = None,
+                        seq_len = None,
+                        scope = "Multi_Head_Attention",
+                        reuse = None,
+                        mask = None,
+                        is_training = True,
+                        bias = True,
+                        dropout = 0.0):
+    with tf.variable_scope(scope, reuse = reuse):
+        # Self attention
+        if memory is None:
+            memory = queries
+
+        memory = conv(memory, 2 * units, name="memory_projection", reuse=reuse)
+        query = conv(queries, units, name="query_projection", reuse=reuse)
+        Q = split_last_dimension(query, num_heads)
+        K, V = [split_last_dimension(tensor, num_heads) for tensor in tf.split(memory,2,axis = 2)]
+
+        key_depth_per_head = units // num_heads
+        Q *= key_depth_per_head**-0.5
+        x = dot_product_attention(Q, K, V,
+                                  bias=bias,
+                                  seq_len=seq_len,
+                                  mask=mask,
+                                  is_training=is_training,
+                                  scope="dot_product_attention",
+                                  reuse=reuse, dropout=dropout)
+        return combine_last_two_dimensions(tf.transpose(x, [0, 2, 1, 3]))
+
+def dot_product_attention(q,
+                          k,
+                          v,
+                          bias,
+                          seq_len=None,
+                          mask=None,
+                          is_training=True,
+                          scope=None,
+                          reuse=None,
+                          dropout=0.0):
+    """dot-product attention.
+    Args:
+    q: a Tensor with shape [batch, heads, length_q, depth_k]
+    k: a Tensor with shape [batch, heads, length_kv, depth_k]
+    v: a Tensor with shape [batch, heads, length_kv, depth_v]
+    bias: bias Tensor (see attention_bias())
+    is_training: a bool of training
+    scope: an optional string
+    Returns:
+    A Tensor.
+    """
+    with tf.variable_scope(scope, default_name="dot_product_attention", reuse=reuse):
+        # [batch, num_heads, query_length, memory_length]
+        logits = tf.matmul(q, k, transpose_b=True)
+        if bias:
+            b = tf.get_variable("bias",
+                                logits.shape[-1],
+                                regularizer=regularizer,
+                                initializer=tf.zeros_initializer())
+            logits += b
+        if mask is not None:
+            shapes = [x if x != None else -1 for x in logits.shape.as_list()]
+            mask = tf.reshape(mask, [shapes[0], 1, 1, shapes[-1]])
+            logits = mask_logits(logits, mask)
+        weights = tf.nn.softmax(logits, name="attention_weights")
+        # dropping out the attention links for each of the heads
+        weights = tf.nn.dropout(weights, 1.0 - dropout)
+        return tf.matmul(weights, v)
