@@ -19,9 +19,12 @@ from tensorflow.contrib.layers import xavier_initializer as xav
 
 import csoftmax_attention
 from log import get_logger
+<<<<<<< HEAD
 from cnn_utils import conv
 from mask_utils import mask_logits
 from nn_utils import split_last_dimension, combine_last_two_dimensions, regularizer
+=======
+>>>>>>> bf76dbd31324009d829bffa2de03cea539194957
 
 
 log = get_logger(__name__)
