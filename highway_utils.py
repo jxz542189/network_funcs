@@ -24,3 +24,11 @@ def highway_network(arg, num_layers, bias, bias_start=0.0, scope=None, wd=0.0, i
                                 input_keep_prob=input_keep_prob, is_train=is_train)
             prev = cur
         return cur
+
+
+def multi_highway_layer(in_val, output_size, num_layers, activation_func=tf.tanh, scope_name=None, reuse=False):
+    with tf.variable_scope(scope_name, reuse=reuse):
+        for i in range(num_layers):
+            cur_scope_name = scope_name + "-{}".format(i)
+            in_val = highway_layer(in_val, output_size,activation_func=activation_func, scope=cur_scope_name)
+    return in_val

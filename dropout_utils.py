@@ -10,6 +10,14 @@ from tensorflow.python.framework import ops
 from tensorflow.contrib.rnn import DropoutWrapper
 
 
+def dropout_layer(input_reps, dropout_rate, is_training=True):
+    if is_training:
+        output_repr = tf.nn.dropout(input_reps, (1 - dropout_rate))
+    else:
+        output_repr = input_reps
+    return output_repr
+
+
 def dropout_selu(x, rate, alpha=-1.7580993408473766, fixedPointMean=0.0, fixedPointVar=1.0,
                  noise_shape=None, seed=None, name=None, training=False):
     '''
