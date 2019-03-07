@@ -4,6 +4,7 @@ import tensorflow as tf
 from functools import reduce
 from operator import mul
 from activation_utils import selu
+import math
 
 
 initializer = lambda: tf.contrib.layers.variance_scaling_initializer(factor=1.0,
@@ -15,6 +16,37 @@ initializer_relu = lambda: tf.contrib.layers.variance_scaling_initializer(factor
                                                              uniform=False,
                                                              dtype=tf.float32)
 regularizer = tf.contrib.layers.l2_regularizer(scale=3e-7)
+
+
+def split_last_dimension(x, n):
+    """Reshape x so that the last dimension becomes two dimensions.
+    The first of these two dimensions is n.
+    Args:
+    x: a Tensor with shape [..., m]
+    n: an integer.
+    Returns:
+    a Tensor with shape [..., n, m/n]
+    """
+    old_shape = x.get_shape().dims
+    last = old_shape[-1]
+    new_shape = old_shape[:-1] + [n] + [last // n if last else None]
+    ret = tf.reshape(x, tf.concat([tf.shape(x)[:-1], [n, -1]], 0))
+    ret.set_shape(new_shape)
+    return tf.transpose(ret, [0, 2, 1, 3])
+
+def combine_last_two_dimensions(x):
+    """Reshape x so that the last two dimension become one.
+    Args:
+    x: a Tensor with shape [..., a, b]
+    Returns:
+    a Tensor with shape [..., ab]
+    """
+    old_shape = x.get_shape().dims
+    a, b = old_shape[-2:]
+    new_shape = old_shape[:-2] + [a * b if a and b else None]
+    ret = tf.reshape(x, tf.concat([tf.shape(x)[:-2], [-1]], 0))
+    ret.set_shape(new_shape)
+    return ret
 
 
 def bn_dense_layer(input_tensor, hn, bias, bias_start=0.0, scope=None,
@@ -394,3 +426,80 @@ def ndim(x):
     if dims is not None:
         return len(dims)
     return None
+
+
+def add_timing_signal_1d(x, min_timescale=1.0, max_timescale=1.0e4):
+    """Adds a bunch of sinusoids of different frequencies to a Tensor.
+    Each channel of the input Tensor is incremented by a sinusoid of a different
+    frequency and phase.
+    This allows attention to learn to use absolute and relative positions.
+    Timing signals should be added to some precursors of both the query and the
+    memory inputs to attention.
+    The use of relative position is possible because sin(x+y) and cos(x+y) can be
+    experessed in terms of y, sin(x) and cos(x).
+    In particular, we use a geometric sequence of timescales starting with
+    min_timescale and ending with max_timescale.  The number of different
+    timescales is equal to channels / 2. For each timescale, we
+    generate the two sinusoidal signals sin(timestep/timescale) and
+    cos(timestep/timescale).  All of these sinusoids are concatenated in
+    the channels dimension.
+    Args:
+    x: a Tensor with shape [batch, length, channels]
+    min_timescale: a float
+    max_timescale: a float
+    Returns:
+    a Tensor the same shape as x.
+    """
+    length = tf.shape(x)[1]
+    channels = tf.shape(x)[2]
+    signal = get_timing_signal_1d(length, channels, min_timescale, max_timescale)
+    return x + signal
+
+
+def get_timing_signal_1d(length, channels, min_timescale=1.0, max_timescale=1.0e4):
+    """Gets a bunch of sinusoids of different frequencies.
+    Each channel of the input Tensor is incremented by a sinusoid of a different
+    frequency and phase.
+    This allows attention to learn to use absolute and relative positions.
+    Timing signals should be added to some precursors of both the query and the
+    memory inputs to attention.
+    The use of relative position is possible because sin(x+y) and cos(x+y) can be
+    experessed in terms of y, sin(x) and cos(x).
+    In particular, we use a geometric sequence of timescales starting with
+    min_timescale and ending with max_timescale.  The number of different
+    timescales is equal to channels / 2. For each timescale, we
+    generate the two sinusoidal signals sin(timestep/timescale) and
+    cos(timestep/timescale).  All of these sinusoids are concatenated in
+    the channels dimension.
+    Args:
+    length: scalar, length of timing signal sequence.
+    channels: scalar, size of timing embeddings to create. The number of
+        different timescales is equal to channels / 2.
+    min_timescale: a float
+    max_timescale: a float
+    Returns:
+    a Tensor of timing signals [1, length, channels]
+    """
+    position = tf.to_float(tf.range(length))
+    num_timescales = channels // 2
+    log_timescale_increment = (
+        math.log(float(max_timescale) / float(min_timescale)) /
+            (tf.to_float(num_timescales) - 1))
+    inv_timescales = min_timescale * tf.exp(
+        tf.to_float(tf.range(num_timescales)) * -log_timescale_increment)
+    scaled_time = tf.expand_dims(position, 1) * tf.expand_dims(inv_timescales, 0)
+    signal = tf.concat([tf.sin(scaled_time), tf.cos(scaled_time)], axis=1)
+    signal = tf.pad(signal, [[0, 0], [0, tf.mod(channels, 2)]])
+    signal = tf.reshape(signal, [1, length, channels])
+    return signal
+
+
+def total_params():
+    total_parameters = 0
+    for variable in tf.trainable_variables():
+        shape = variable.get_shape()
+        variable_parametes = 1
+        for dim in shape:
+            variable_parametes *= dim.value
+        total_parameters += variable_parametes
+    print("Total number of trainable parameters: {}".format(total_parameters))

@@ -220,3 +220,26 @@ def multiplicative_self_attention(units, n_hidden=None, n_output_features=None, 
     attended_units = tf.reduce_sum(attention * expand_tile(units, 1), axis=2)
     output = tf.layers.dense(attended_units, n_output_features, activation, kernel_initializer=INITIALIZER())
     return output
+
+
+def self_attention_block(inputs, num_filters, seq_len, mask=None, num_heads=8,
+                         scope="self_attention_ffn", reuse=None, is_training=True,
+                         bias=True, dropout=0.0, sublayers=(1, 1)):
+    with tf.variable_scope(scope, reuse=reuse):
+        l, L = sublayers
+        # Self attention
+        outputs = norm_fn(inputs, scope="layer_norm_1", reuse=reuse)
+        outputs = tf.nn.dropout(outputs, 1.0 - dropout)
+        outputs = multihead_attention(outputs, num_filters,
+            num_heads=num_heads, seq_len=seq_len, reuse=reuse,
+            mask=mask, is_training=is_training, bias=bias, dropout=dropout)
+        residual = layer_dropout(outputs, inputs, dropout * float(l) / L)
+        l += 1
+        # Feed-forward
+        outputs = norm_fn(residual, scope="layer_norm_2", reuse=reuse)
+        outputs = tf.nn.dropout(outputs, 1.0 - dropout)
+        outputs = conv(outputs, num_filters, True, tf.nn.relu, name="FFN_1", reuse=reuse)
+        outputs = conv(outputs, num_filters, True, None, name="FFN_2", reuse=reuse)
+        outputs = layer_dropout(outputs, residual, dropout * float(l) / L)
+        l += 1
+        return outputs, l

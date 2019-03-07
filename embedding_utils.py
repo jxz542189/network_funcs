@@ -1,5 +1,6 @@
 import tensorflow as tf
-
+import numpy as np
+from nn_utils import initializer as INITIALIZER
 
 def embedding_layer(token_indices=None,
                     token_embedding_matrix=None,
@@ -97,3 +98,245 @@ def character_embedding_network(char_placeholder: tf.Tensor,
             units = sigmoid_gate * units + (1 - sigmoid_gate) * deeper_units
             units = tf.nn.relu(units)
     return units
+
+def _build_word_char_embeddings(batch_size, unroll_steps, projection_dim,
+                                cnn_options, bidirectional):
+    '''bilm-tf
+    options contains key 'char_cnn': {
+
+    'n_characters': 262,
+
+    # includes the start / end characters
+    'max_characters_per_token': 50,
+
+    'filters': [
+        [1, 32],
+        [2, 32],
+        [3, 64],
+        [4, 128],
+        [5, 256],
+        [6, 512],
+        [7, 512]
+    ],
+    'activation': 'tanh',
+
+    # for the character embedding
+    'embedding': {'dim': 16}
+
+    # for highway layers
+    # if omitted, then no highway layers
+    'n_highway': 2,
+    }
+    '''
+
+    filters = cnn_options['filters']
+    n_filters = sum(f[1] for f in filters)
+    max_chars = cnn_options['max_characters_per_token']
+    char_embed_dim = cnn_options['embedding']['dim']
+    n_chars = cnn_options['n_characters']
+    if cnn_options['activation'] == 'tanh':
+        activation = tf.nn.tanh
+    elif cnn_options['activation'] == 'relu':
+        activation = tf.nn.relu
+
+    # the input character ids
+    tokens_characters = tf.placeholder(tf.int32,
+                                            shape=(batch_size, unroll_steps, max_chars),
+                                            name='tokens_characters')
+    # the character embeddings
+    with tf.device("/cpu:0"):
+        embedding_weights = tf.get_variable(
+            "char_embed", [n_chars, char_embed_dim],
+            dtype=tf.float32,
+            initializer=tf.random_uniform_initializer(-1.0, 1.0)
+        )
+        # shape (batch_size, unroll_steps, max_chars, embed_dim)
+        char_embedding = tf.nn.embedding_lookup(embedding_weights,
+                                                     tokens_characters)
+
+        if bidirectional:
+            tokens_characters_reverse = tf.placeholder(tf.int32,
+                                                            shape=(batch_size, unroll_steps, max_chars),
+                                                            name='tokens_characters_reverse')
+            char_embedding_reverse = tf.nn.embedding_lookup(
+                embedding_weights, tokens_characters_reverse)
+
+    # the convolutions
+    def make_convolutions(inp, reuse):
+        with tf.variable_scope('CNN', reuse=reuse) as scope:
+            convolutions = []
+            for i, (width, num) in enumerate(filters):
+                if cnn_options['activation'] == 'relu':
+                    # He initialization for ReLU activation
+                    # with char embeddings init between -1 and 1
+                    # w_init = tf.random_normal_initializer(
+                    #    mean=0.0,
+                    #    stddev=np.sqrt(2.0 / (width * char_embed_dim))
+                    # )
+
+                    # Kim et al 2015, +/- 0.05
+                    w_init = tf.random_uniform_initializer(
+                        minval=-0.05, maxval=0.05)
+                elif cnn_options['activation'] == 'tanh':
+                    # glorot init
+                    w_init = tf.random_normal_initializer(
+                        mean=0.0,
+                        stddev=np.sqrt(1.0 / (width * char_embed_dim))
+                    )
+                w = tf.get_variable(
+                    "W_cnn_%s" % i,
+                    [1, width, char_embed_dim, num],
+                    initializer=w_init,
+                    dtype=tf.float32)
+                b = tf.get_variable(
+                    "b_cnn_%s" % i, [num], dtype=tf.float32,
+                    initializer=tf.constant_initializer(0.0))
+
+                conv = tf.nn.conv2d(
+                    inp, w,
+                    strides=[1, 1, 1, 1],
+                    padding="VALID") + b
+                # now max pool
+                conv = tf.nn.max_pool(
+                    conv, [1, 1, max_chars - width + 1, 1],
+                    [1, 1, 1, 1], 'VALID')
+
+                # activation
+                conv = activation(conv)
+                conv = tf.squeeze(conv, squeeze_dims=[2])
+
+                convolutions.append(conv)
+
+        return tf.concat(convolutions, 2)
+
+    # for first model, this is False, for others it's True
+    reuse = tf.get_variable_scope().reuse
+    embedding = make_convolutions(char_embedding, reuse)
+
+    token_embedding_layers = [embedding]
+
+    if bidirectional:
+        # re-use the CNN weights from forward pass
+        embedding_reverse = make_convolutions(
+            char_embedding_reverse, True)
+
+    # for highway and projection layers:
+    #   reshape from (batch_size, n_tokens, dim) to
+    n_highway = cnn_options.get('n_highway')
+    use_highway = n_highway is not None and n_highway > 0
+    use_proj = n_filters != projection_dim
+
+    if use_highway or use_proj:
+        embedding = tf.reshape(embedding, [-1, n_filters])
+        if bidirectional:
+            embedding_reverse = tf.reshape(embedding_reverse,
+                                           [-1, n_filters])
+
+    # set up weights for projection
+    if use_proj:
+        assert n_filters > projection_dim
+        with tf.variable_scope('CNN_proj') as scope:
+            W_proj_cnn = tf.get_variable(
+                "W_proj", [n_filters, projection_dim],
+                initializer=tf.random_normal_initializer(
+                    mean=0.0, stddev=np.sqrt(1.0 / n_filters)),
+                dtype=tf.float32)
+            b_proj_cnn = tf.get_variable(
+                "b_proj", [projection_dim],
+                initializer=tf.constant_initializer(0.0),
+                dtype=tf.float32)
+
+    # apply highways layers
+    def high(x, ww_carry, bb_carry, ww_tr, bb_tr):
+        carry_gate = tf.nn.sigmoid(tf.matmul(x, ww_carry) + bb_carry)
+        transform_gate = tf.nn.relu(tf.matmul(x, ww_tr) + bb_tr)
+        return carry_gate * transform_gate + (1.0 - carry_gate) * x
+
+    if use_highway:
+        highway_dim = n_filters
+
+        for i in range(n_highway):
+            with tf.variable_scope('CNN_high_%s' % i) as scope:
+                W_carry = tf.get_variable(
+                    'W_carry', [highway_dim, highway_dim],
+                    # glorit init
+                    initializer=tf.random_normal_initializer(
+                        mean=0.0, stddev=np.sqrt(1.0 / highway_dim)),
+                    dtype=tf.float32)
+                b_carry = tf.get_variable(
+                    'b_carry', [highway_dim],
+                    initializer=tf.constant_initializer(-2.0),
+                    dtype=tf.float32)
+                W_transform = tf.get_variable(
+                    'W_transform', [highway_dim, highway_dim],
+                    initializer=tf.random_normal_initializer(
+                        mean=0.0, stddev=np.sqrt(1.0 / highway_dim)),
+                    dtype=tf.float32)
+                b_transform = tf.get_variable(
+                    'b_transform', [highway_dim],
+                    initializer=tf.constant_initializer(0.0),
+                    dtype=tf.float32)
+
+            embedding = high(embedding, W_carry, b_carry,
+                             W_transform, b_transform)
+            if bidirectional:
+                embedding_reverse = high(embedding_reverse,
+                                         W_carry, b_carry,
+                                         W_transform, b_transform)
+            token_embedding_layers.append(
+                tf.reshape(embedding,
+                           [batch_size, unroll_steps, highway_dim])
+            )
+
+    # finally project down to projection dim if needed
+    if use_proj:
+        embedding = tf.matmul(embedding, W_proj_cnn) + b_proj_cnn
+        if bidirectional:
+            embedding_reverse = tf.matmul(embedding_reverse, W_proj_cnn) \
+                                + b_proj_cnn
+        token_embedding_layers.append(
+            tf.reshape(embedding,
+                       [batch_size, unroll_steps, projection_dim])
+        )
+
+    # reshape back to (batch_size, tokens, dim)
+    if use_highway or use_proj:
+        shp = [batch_size, unroll_steps, projection_dim]
+        embedding = tf.reshape(embedding, shp)
+        if bidirectional:
+            embedding_reverse = tf.reshape(embedding_reverse, shp)
+
+    # at last assign attributes for remainder of the model
+    embedding = embedding
+    if bidirectional:
+        embedding_reverse = embedding_reverse
+        return tf.concat([embedding, embedding_reverse], axis=-1)
+    else:
+        return embedding
+
+
+def _build_word_embeddings(n_tokens_vocab, batch_size, unroll_steps,
+                           projection_dim, bidirectional):
+
+    # the input token_ids and word embeddings
+    token_ids = tf.placeholder(tf.int32,
+                           shape=(batch_size, unroll_steps),
+                           name='token_ids')
+    # the word embeddings
+    with tf.device("/cpu:0"):
+        embedding_weights = tf.get_variable(
+            "embedding", [n_tokens_vocab, projection_dim],
+            dtype=tf.float32,
+        )
+        embedding = tf.nn.embedding_lookup(embedding_weights,
+                                            token_ids)
+
+    # if a bidirectional LM then make placeholders for reverse
+    # model and embeddings
+    if bidirectional:
+        token_ids_reverse = tf.placeholder(tf.int32,
+                           shape=(batch_size, unroll_steps),
+                           name='token_ids_reverse')
+        with tf.device("/cpu:0"):
+            embedding_reverse = tf.nn.embedding_lookup(
+                embedding_weights, token_ids_reverse)

@@ -1,5 +1,7 @@
 import tensorflow as tf
 from nn_utils import flatten, reconstruct
+from nn_utils import initializer as INITIALIZER
+
 from tensorflow.python.ops import nn_ops
 
 INF = 1e30
@@ -313,28 +315,28 @@ def my_lstm_layer(input_reps, lstm_dim, input_lengths=None, scope_name=None, reu
     '''
     input_reps = dropout_layer(input_reps, dropout_rate, is_training=is_training)
     with tf.variable_scope(scope_name, reuse=reuse):
-        if use_cudnn:
-            inputs = tf.transpose(input_reps, [1, 0, 2])
-            lstm = tf.contrib.cudnn_rnn.CudnnLSTM(1, lstm_dim, direction="bidirectional",
-                                                  name="{}_cudnn_bi_lstm".format(scope_name),
-                                                  dropout=dropout_rate if is_training else 0)
-            outputs, _ = lstm(inputs)
-            outputs = tf.transpose(outputs, [1, 0, 2])
-            f_rep = outputs[:, :, 0:lstm_dim]
-            b_rep = outputs[:, :, lstm_dim: s * lstm_dim]
-        else:
-            context_lstm_cell_fw = tf.nn.rnn_cell.BasicLSTMCell(lstm_dim)
-            context_lstm_cell_bw = tf.nn.rnn_cell.BasicLSTMCell(lstm_dim)
-            if is_training:
-                context_lstm_cell_fw = tf.nn.rnn_cell.DropoutWrapper(context_lstm_cell_fw,
-                                                                     output_keep_prob=(1 - dropout_rate))
-                context_lstm_cell_bw = tf.nn.rnn_cell.DropoutWrapper(context_lstm_cell_bw,
-                                                                     output_keep_prob=(1 - dropout_rate))
-            context_lstm_cell_fw = tf.nn.rnn_cell.MultiRNNCell([context_lstm_cell_fw])
-            context_lstm_cell_bw = tf.nn.rnn_cell.MultiRNNCell([context_lstm_cell_bw])
-            (f_rep, b_rep), _ = tf.nn.bidirectional_dynamic_rnn(context_lstm_cell_fw, context_lstm_cell_bw, input_reps,
-                                                                dtype=tf.float32, sequence_length=input_lengths)
-            outputs = tf.concat(axis=2, values=[f_rep, b_rep])
+        # if use_cudnn:
+        #     inputs = tf.transpose(input_reps, [1, 0, 2])
+        #     lstm = tf.contrib.cudnn_rnn.CudnnLSTM(1, lstm_dim, direction="bidirectional",
+        #                                           name="{}_cudnn_bi_lstm".format(scope_name),
+        #                                           dropout=dropout_rate if is_training else 0)
+        #     outputs, _ = lstm(inputs)
+        #     outputs = tf.transpose(outputs, [1, 0, 2])
+        #     f_rep = outputs[:, :, 0:lstm_dim]
+        #     b_rep = outputs[:, :, lstm_dim: s * lstm_dim]
+        # else:
+        context_lstm_cell_fw = tf.nn.rnn_cell.BasicLSTMCell(lstm_dim)
+        context_lstm_cell_bw = tf.nn.rnn_cell.BasicLSTMCell(lstm_dim)
+        if is_training:
+            context_lstm_cell_fw = tf.nn.rnn_cell.DropoutWrapper(context_lstm_cell_fw,
+                                                                 output_keep_prob=(1 - dropout_rate))
+            context_lstm_cell_bw = tf.nn.rnn_cell.DropoutWrapper(context_lstm_cell_bw,
+                                                                 output_keep_prob=(1 - dropout_rate))
+        context_lstm_cell_fw = tf.nn.rnn_cell.MultiRNNCell([context_lstm_cell_fw])
+        context_lstm_cell_bw = tf.nn.rnn_cell.MultiRNNCell([context_lstm_cell_bw])
+        (f_rep, b_rep), _ = tf.nn.bidirectional_dynamic_rnn(context_lstm_cell_fw, context_lstm_cell_bw, input_reps,
+                                                            dtype=tf.float32, sequence_length=input_lengths)
+        outputs = tf.concat(axis=2, values=[f_rep, b_rep])
     return f_rep, b_rep, outputs
 
 

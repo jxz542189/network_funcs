@@ -39,3 +39,9 @@ def exp_mask(val, mask, name=None):
     if name is None:
         name = "exp_mask"
     return tf.add(val, (1 - tf.cast(mask, 'float')) * VERY_NEGATIVE_NUMBER, name=name)
+
+
+def mask_logits(inputs, mask, mask_value=-1e30):
+    shapes = inputs.shape.as_list()
+    mask = tf.cast(mask, tf.float32)
+    return inputs + mask_value * (1 - mask)
